@@ -1,0 +1,8 @@
+Pillow
+brotli
+cryptography
+fastapi
+httpx
+imagehash
+pydantic
+uvicorn
