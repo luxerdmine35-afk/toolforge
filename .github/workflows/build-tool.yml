@@ -1,0 +1,127 @@
+name: build-tool
+run-name: "Build tool ${{ inputs.tool_name }} by @${{ github.actor }}"
+
+"on":
+  workflow_dispatch:
+    inputs:
+      tool_name:
+        description: "Nama tool (dipakai buat nama file hasil, misal: proxycheck, keygen)"
+        required: true
+        type: string
+      script_path:
+        description: "Path ke script Python tool ini di dalam repo (misal: scripts/proxycheck.py)"
+        required: true
+        type: string
+      requirements_path:
+        description: "Path ke requirements.txt tool ini di dalam repo (misal: requirements/proxycheck.txt)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            ext: ".exe"
+          - os: ubuntu-latest
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 100 || 60 }}
+    env:
+      NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
+
+    steps:
+      - name: Checkout repo (scripts/ + requirements/)
+        uses: actions/checkout@v4
+
+      - name: Setup Python (pinned 3.12)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "requirements/*.txt"
+
+      - name: Install ccache (Linux only -- speeds up repeat C compiles)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y ccache
+
+      - name: Pastikan script & requirements tool ini ada
+        shell: bash
+        run: |
+          if [ ! -f "${{ inputs.script_path }}" ]; then
+            echo "❌ Script tidak ditemukan: ${{ inputs.script_path }}"
+            exit 1
+          fi
+          if [ ! -f "${{ inputs.requirements_path }}" ]; then
+            echo "❌ Requirements tidak ditemukan: ${{ inputs.requirements_path }}"
+            exit 1
+          fi
+          cp "${{ inputs.requirements_path }}" requirements.txt
+          echo "isi requirements.txt untuk tool ${{ inputs.tool_name }}:"
+          cat requirements.txt
+
+      - name: Cache ccache directory (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ matrix.os }}-${{ inputs.tool_name }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ccache-${{ matrix.os }}-${{ inputs.tool_name }}-
+            ccache-${{ matrix.os }}-
+
+      - name: Cache Nuitka compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.nuitka-cache
+          key: nuitka-${{ matrix.os }}-${{ inputs.tool_name }}-${{ hashFiles('requirements.txt') }}-${{ hashFiles(inputs.script_path) }}
+          restore-keys: |
+            nuitka-${{ matrix.os }}-${{ inputs.tool_name }}-${{ hashFiles('requirements.txt') }}-
+            nuitka-${{ matrix.os }}-${{ inputs.tool_name }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka zstandard
+          pip install -r requirements.txt
+
+      - name: Build --include-package flags dari requirements.txt tool ini
+        id: include_flags
+        shell: bash
+        run: |
+          # Mapping nama pip -> nama import ASLI (Nuitka butuh nama import, bukan nama pip).
+          map_import_name() {
+            case "$1" in
+              pycryptodome) echo "Crypto" ;;
+              Pillow|pillow) echo "PIL" ;;
+              beautifulsoup4) echo "bs4" ;;
+              python-dotenv) echo "dotenv" ;;
+              PyYAML|pyyaml) echo "yaml" ;;
+              opencv-python) echo "cv2" ;;
+              *) echo "$1" ;;
+            esac
+          }
+
+          FLAGS=""
+          for pkg in $(grep -vE '^\s*#|^\s*$' requirements.txt); do
+            import_name=$(map_import_name "$pkg")
+            FLAGS="$FLAGS --include-package=$import_name"
+          done
+          echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Compile with Nuitka
+        shell: bash
+        run: |
+          python -m nuitka --onefile --assume-yes-for-downloads \
+            ${{ steps.include_flags.outputs.flags }} \
+            --output-filename=${{ inputs.tool_name }}${{ matrix.ext }} \
+            "${{ inputs.script_path }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.tool_name }}-${{ matrix.os }}
+          path: ${{ inputs.tool_name }}${{ matrix.ext }}
