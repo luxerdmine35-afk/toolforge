@@ -1,3 +1,7 @@
+import uvicorn.protocols.http.h11_impl
+import uvicorn.protocols.http.auto
+import uvicorn.lifespan.on
+import uvicorn.loops.auto
 import asyncio
 import random
 import time
